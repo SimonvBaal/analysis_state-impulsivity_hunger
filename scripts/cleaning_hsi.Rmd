@@ -1,0 +1,311 @@
+---
+title: "Impulsivity_EMA"
+author: "Simon van Baal"
+date: "21/09/2020"
+output: html_document
+---
+
+```{r libraries}
+
+library(lubridate)
+library(here)
+library(readr)
+library(dplyr)
+library(tidyr)
+
+# Package management
+library(renv)
+#init::renv
+
+```
+
+
+```{r load-in data}
+eligibility <-
+  read_csv(here("./raw-data/raw_eligibility-anon_hsi.csv"))
+
+semaData <- 
+  read_csv(here("./raw-data/raw_sema-data_hsi.csv"))
+
+IdLinks <- 
+  read_csv(here("./raw-data/raw_id-links_hsi.csv"))
+
+
+```
+
+
+
+```{r data cleaning - eligibility}
+
+#--------------------------------------------------------- Eligibility survey
+
+eligibility <- 
+  eligibility %>%
+  slice(-2) %>%
+  filter(!is.na(Q6) & Finished != "False") %>%
+  select(Q6, everything()) # Change order so ID is in front
+
+# If you want to see the questions in the survey, 
+# including the unused questionnaires of the overarching project:
+questions <-
+  eligibility %>%
+  slice(1) %>%
+  t()
+
+eligibility <- 
+  eligibility %>%
+  slice(-1) %>%
+  pivot_longer(c("Q23":"59"), names_to = "Question", 
+               values_to = "Response") %>%
+  select(-c("EndDate":"Q145")) %>%
+  select(Q6, StartDate, Question, Response, everything())
+
+colnames(eligibility) <- c(
+  "SurveyID",
+  "Date",
+  "Question",
+  "Response",
+  "Age",
+  "Sex",
+  "Height",
+  "Weight",
+  "EducationDuration",
+  "Postcode",
+  "Ethnicity",
+  "OtherEthnicity",
+  "PrimLangEnglish"
+)
+
+# Note: ethnicity data was not collected with proper classifications. 
+# The information should only be used to show the sample was somewhat 
+# culturally and ethnically diverse.
+
+# Examine duplicates in eligibility
+
+duplicates <- 
+  eligibility %>% 
+  group_by(SurveyID, Date) %>%
+  summarise(n = n())
+
+actualDuplicates <- 
+  duplicates %>%
+  filter(duplicated(SurveyID))
+
+# Delete the last response if they completed the Eligibility survey twice
+
+duplicates <-
+  duplicates %>%
+  filter(!(SurveyID %in% actualDuplicates$SurveyID & Date %in% actualDuplicates$Date))
+
+# Now filter out the duplicates
+eligibility <- 
+  eligibility %>%
+  filter(SurveyID %in% duplicates$SurveyID & Date %in% duplicates$Date)
+
+rm(duplicates, actualDuplicates)
+
+# Add a column describing the measurement being taken for each question
+# This survey data was obtained for another part of the overarching project,
+
+eligibility <- 
+  eligibility %>%
+  group_by(SurveyID) %>%
+  mutate(Questionnaire = rep(c("DASS", "MCQ", "UPPS-P"), times = c(21, 29, 59)))
+```
+
+```{r data cleaning - SEMA3 data}
+
+#------------------------------------------------- SEMA3 data
+# Deselect unused columns and arrange (sort) by ID and time.
+semaData <-
+  semaData %>% 
+  select(-SURVEY_NAME,
+                    -STUDY_NAME,
+                    -SURVEY_ID,
+                    -STUDY_ID,
+                    -TRIGGER,
+                    -EXPORT_TZ,
+                    -CREATED_TS,
+                    -SCHEDULED_TS,
+                    -UPLOADED_TS) %>%
+  rename(SemaID = PARTICIPANT_ID) %>%
+  arrange(SemaID, STARTED_TS)
+
+# Make time variables and <no-response> recognisable for R w lubridate package
+# and self-defined function.
+semaData <- 
+  semaData %>% 
+  mutate(DateTime = dmy_hm(STARTED_TS),
+         dayOfMonth = day(DateTime),
+         weekDay = factor(wday(DateTime, label = TRUE, abbr = T), 
+                          levels = c('Mon', 'Tue', 'Wed', 
+                                     'Thu', 'Fri', 'Sat', 'Sun')),
+         hour = hour(DateTime)
+         ) %>%
+  mutate_at(vars(TOTAL_RT:SPUR_OF_MOMENT_RT), 
+            function(x) ifelse(x == '<no-response>' | x == '<not-shown>', NA, x)) %>%
+  mutate_at(vars(EXPIRED_TS:SPUR_OF_MOMENT_RT), function(x) as.numeric(x))
+
+# Creating an aggregate score for the Tomko et al. Momentary Impulsivity Scale
+semaData <- 
+  semaData %>%
+  mutate(MIS = (SAID_WOUT_THINK + SPENT_MORE + FELT_IMPATIENT + SPUR_OF_MOMENT)/4)
+
+```
+
+
+```{r data cleaning - ID linking}
+
+#------------------------------------------------ID links file
+colnames(IdLinks) <-
+  c("Status",
+    "SurveyID",
+    "ParticipantID",
+    "SemaID")
+
+# Uncomment the next command to see some of the duplicates mentioned before.
+# IdLinks %>%
+#   filter(SurveyID %in% c("ANTR78", "CAKE92", 
+# "JISO97", "MEHO93", 
+# "MIMC76", "SALI97", 
+# "ANHO95"))
+
+IdLinks <- 
+  IdLinks %>%
+  filter(Status == "Complete")
+
+
+```
+
+
+```{r linking behavioural data to demographics}
+
+# Link semaData with eligibility
+
+semaData <- 
+  semaData %>%
+  left_join(IdLinks, by = "SemaID")
+
+
+semaData <-
+  semaData %>%
+  left_join(eligibility %>%
+              group_by(SurveyID,
+                       Sex) %>%
+              summarise(Age = mean(as.numeric(Age))),
+            by = "SurveyID") %>%
+  select(ParticipantID,
+         Sex,
+         Age,
+         everything())
+
+
+```
+
+
+```{r data cleaning - long data}
+# select all necessary columns and rename columns for pivoting (name_sep arg) 
+longData <- 
+  semaData %>%
+  select(ParticipantID,
+         Age,
+         Sex,
+         DateTime,
+         weekDay,
+         hour,
+         MIS,
+         SMOKE,
+         SMOKE_CONTROL_URGE,
+         SMOKE_HUNGRY_URGE,
+         GAMBLE,
+         GAMBLE_CONTROL_URGE,
+         GAMBLE_HUNGRY_URGE,
+         SNACK,
+         SNACK_CONTROL_URGE,
+         SNACK_HUNGRY_URGE,
+         DRINK,
+         DRINK_CONTROL_URGE,
+         DRINK_HUNGRY_URGE,
+         SHOP,
+         SHOP_CONTROL_URGE,
+         SHOP_HUNGRY_URGE,
+         HIT_SOMETHING,
+         HIT_CONTROL_URGE,
+         HIT_HUNGRY_URGE,
+         SAID_WOUT_THINK,
+         SPENT_MORE,
+         FELT_IMPATIENT,
+         SPUR_OF_MOMENT) %>%
+  rename(HIT_Urge = HIT_SOMETHING,
+         speakWithoutThink = SAID_WOUT_THINK,
+         spentMore = SPENT_MORE,
+         feltImpatient = FELT_IMPATIENT,
+         spurOfMoment = SPUR_OF_MOMENT,
+         SMOKE_Urge = SMOKE,
+         GAMBLE_Urge = GAMBLE,
+         SNACK_Urge = SNACK,
+         DRINK_Urge = DRINK,
+         SHOP_Urge = SHOP) %>%
+  pivot_longer(cols = SMOKE_Urge:HIT_HUNGRY_URGE,
+               names_to = c("typeOfUrge", ".value"),
+               names_sep = "_",
+               values_to = "urgeStrength") %>%
+  mutate_at(vars(Urge:HUNGRY), function(x) ifelse(x == -1, 0, x)) %>%
+  mutate(controlText = factor(ifelse(CONTROL == 1, 
+                                     "Urge successfully controlled", 
+                                     "Urge Not successfully controlled")),
+         hungryText = factor(ifelse(HUNGRY == 1, "Subject was hungry", 
+                                    "Subject was not hungry")),
+         urgeBinary = factor(ifelse(Urge > 0, 1, 0)),
+         urgeMagnitude = factor(ifelse(Urge > 0, Urge, NA)),
+         timeOfDay = factor(ifelse(hour < 12, "Morning",
+                            ifelse(hour < 16, "Early Afternoon",
+                                   ifelse(hour < 20, "Late Afternoon", 
+                                          "Evening"))),
+                            levels = c("Morning", "Early Afternoon", 
+                                       "Late Afternoon", "Evening")))
+# It gives a warning but it does not seem any rows were removed: 1704 * 6 = 10224.
+
+```
+```{r descriptives}
+
+# descriptives about response rates
+
+semaData %>% 
+  filter(!is.na(ParticipantID)) %>%
+  group_by(STARTED_TS) %>%
+  filter(is.na(STARTED_TS)) %>%
+  summarise(n = n())
+# 350 out of 1666 were not responded to.
+
+semaData %>% 
+  filter(!is.na(ParticipantID)) %>%
+  filter(if_any(c(SMOKE, GAMBLE,
+                  SNACK, HIT_SOMETHING,
+                  DRINK, SHOP), ~ .x >= 1)) %>%
+  summarise(n = n())
+# 874 surveys saw at least one urge reported.
+
+
+```
+
+```{r write data}
+
+write_csv(longData, 
+          here("./output/clean-data/clean-data_hsi.csv"))
+
+rm(questions, IdLinks,
+   semaData, eligibility,
+   longData)
+```
+
+
+
+
+
+
+
+
+
+
+

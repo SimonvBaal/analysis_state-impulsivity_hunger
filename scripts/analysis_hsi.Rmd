@@ -1,0 +1,413 @@
+---
+title: "Analysis_EMA_AVG"
+author: "Simon van Baal"
+date: "08/12/2020"
+output: html_document
+---
+
+```{r setup}
+# If you skip the cleaning script file, please load the following packages:
+# library(here)
+# library(readr)
+# library(dplyr)
+# library(tidyr)
+
+
+# Load packages
+library(afex)
+library(optimx)
+library(emmeans)
+library(numDeriv)
+```
+
+``` {r load data}
+
+longData <- 
+  read_csv(here("./output/clean-data/clean-data_hsi.csv"))
+
+```
+
+
+
+```{r Reformat from csv}
+
+# Character vectors are turned into factors.
+longData <- 
+  longData %>%
+  mutate(across(c(
+    ParticipantID,
+    Sex,
+    weekDay,
+    typeOfUrge,
+    controlText,
+    hungryText,
+    timeOfDay
+  ),
+  function(x)
+    factor(x)))
+
+# Filter on available data, rename some variables, and center / scale numerical 
+# variables. Age is scaled to assist with convergence.
+analysisData <-
+  longData %>%
+  filter(!is.na(urgeMagnitude), 
+         !is.na(ParticipantID),
+         !is.na(MIS)) %>%
+  rename(urgeIntensity = urgeMagnitude,
+         hungerState = hungryText,
+         urgeControlled = CONTROL,
+         sex = Sex) %>%
+  mutate(
+      MIS = scale(MIS, scale = T), # help optimizers by scaling values.
+      hour = scale(hour, scale = T),
+      age = scale(Age, scale = T),
+    )
+
+# Set variables to sum contrasts
+contrasts(analysisData$typeOfUrge) <- contr.sum
+contrasts(analysisData$weekDay) <- contr.sum
+contrasts(analysisData$hungerState) <- contr.sum
+contrasts(analysisData$ParticipantID) <- contr.sum
+contrasts(analysisData$sex) <- contr.sum
+
+```
+
+## What are some of the key factors determining the strength of urges?
+
+```{r Analysis urge intensity}
+# Run linear mixed model
+
+lmmUrgeStrength <-
+  mixed(
+    urgeIntensity ~
+      hungerState*typeOfUrge +
+      MIS +
+      age +
+      sex +
+      hour +
+      weekDay +
+      (typeOfUrge | ParticipantID),
+    data = analysisData,
+    control = lmerControl(optCtrl = list(
+      ftol_abs = 1e-8,
+      xtol_abs = 1e-8,
+      maxfun = 1e5
+    ))
+  )
+
+tt <- getME(lmmUrgeStrength$full_model, "theta")
+ll <- getME(lmmUrgeStrength$full_model, "lower")
+min(tt[ll==0])
+# not quite singular at 2.36038e-05
+
+VarCorr(lmmUrgeStrength$full_model)
+# No variances at 0 and no correlations at 1
+
+# extract gradient and hessian
+# then redo with Richardson extrapolation
+derivs1Lmm <- lmmUrgeStrength$full_model@optinfo$derivs
+scgrad1Lmm <- with(derivs1Lmm, solve(Hessian,gradient))
+
+devfun <- 
+  update(lmmUrgeStrength$full_model, devFunOnly=TRUE)
+
+parslmmUrgeStrength <- 
+  getME(lmmUrgeStrength$full_model,"theta")
+
+hess <- hessian(devfun, unlist(parslmmUrgeStrength))
+grad <- grad(devfun, unlist(parslmmUrgeStrength))
+scgrad <- solve(hess, grad)
+
+# Compare
+max(pmin(abs(scgrad), abs(grad)))
+max(pmin(abs(scgrad1Lmm),abs(derivs1Lmm$gradient)))
+# They're different, but both pretty close to the boundary.
+
+# Restart fit from value reached initially.
+lmmUrgeStrengthRestart <- update(lmmUrgeStrength$full_model,
+                                 start=parslmmUrgeStrength)
+# Same warning
+
+# Compare optimizer results to make sure convergence errors are false positives.
+optimizerCompLmm <- 
+  allFit(lmmUrgeStrength$full_model)
+lapply(optimizerCompLmm,function(x) x@optinfo$conv$lme4$messages)
+
+sumOptimizerCompLmm <-
+  summary(optimizerCompLmm)
+# We see that the standard optimizer works fine, only Nelder Mead is unreliable.
+sumOptimizerCompLmm$theta
+sumOptimizerCompLmm$llik
+
+# Remove objects created
+rm(lmmUrgeStrengthRestart,
+   parslmmUrgeStrength,
+   devfun,
+   tt,
+   ll,
+   hess,
+   grad)
+
+```
+
+```{r maximally specified urge intensity model}
+
+# Now we run the model with maximal specification of the variables of interest.
+lmmUrgeStrengthFull <-
+  mixed(urgeIntensity ~
+          hungerState*typeOfUrge*MIS +
+          hour +
+          age +
+          sex +
+          hour +
+          weekDay +
+          (typeOfUrge|ParticipantID),
+        data = analysisData,
+        control = lmerControl(
+          optCtrl = list(
+            ftol_abs = 1e-8, 
+            xtol_abs = 1e-8,
+            maxfun = 1e5))
+        )
+
+```
+
+
+```{r coefficients and comparisons}
+
+# MIS confidence intervals
+(ciLowerMisUrge = round(.6220 - .06065 * 1.96, 3))
+(ciUpperMisUrge = round(.6220 + .06065 * 1.96, 3))
+
+# Effect of hunger
+pairsHungerUrgeIntensity <- 
+  pairs(emmeans(lmmUrgeStrength, ~ hungerState))
+confint(pairsHungerUrgeIntensity)
+
+# Urge intensity for different types of urges
+emmTypeOfUrgeIntensity <- 
+  confint(emmeans(lmmUrgeStrength, ~typeOfUrge))
+
+# Interaction type of urge and hunger state
+emmTypeHungerIntensity <-
+  confint(emmeans(lmmUrgeStrength,
+          ~ hungerState|typeOfUrge))
+pairsTypeHungerIntensity <-
+  emmeans(lmmUrgeStrength, pairwise ~ hungerState|typeOfUrge)
+
+# for bonferroni adjusted p-values
+contrastTypeHungerIntensity <- 
+  pairsTypeHungerIntensity$contrasts %>% 
+  rbind()
+
+ciLowerTimeIntensity <- .07321 - 1.96 * .04600
+ciUpperTimeIntensity <- .07321 + 1.96 * .04600
+
+# Control variables
+ciLowerAge <- 1.569e-02 - 1.96 * 1.511e-01
+ciUpperAge <- 1.569e-02 + 1.96 * 1.511e-01
+
+pairs(emmeans(lmmUrgeStrength, ~ sex))
+
+```
+
+## What are some of the key factors for urge control?
+
+```{r Analysis self-control}
+# center urge intensity for the self-control analysis
+controlAnalysisData <-
+  analysisData %>%
+  mutate(urgeIntensity = scale(urgeIntensity, scale = F))
+
+glmmControl <-
+  mixed(
+    urgeControlled ~
+      hungerState*typeOfUrge +
+      MIS +
+      age +
+      sex +
+      hour +
+      weekDay +
+      urgeIntensity +
+      (typeOfUrge | ParticipantID),
+    family = "binomial",
+    method = 'LRT',
+    data = controlAnalysisData,
+    control = glmerControl(
+      optimizer = "bobyqa",
+      optCtrl = list(
+        maxfun = 1e5
+    ))
+  )
+
+## Testing convergence issues
+
+tt <- getME(glmmControl$full_model, "theta")
+ll <- getME(glmmControl$full_model, "lower")
+min(tt[ll==0])
+# One random slope is on the boundary.
+
+VarCorr(glmmControl$full_model)
+# No variances at 0, but the same random slope has correlation = 1
+
+# extract gradient and hessian
+# then redo with Richardson extrapolation
+derivs1Glmm <- glmmControl$full_model@optinfo$derivs
+scgrad1Glmm <- with(derivs1Glmm, solve(Hessian,gradient))
+
+devfun <- 
+  update(glmmControl$full_model, devFunOnly=TRUE)
+
+parsglmmControl <- 
+  getME(glmmControl$full_model, c("theta","fixef"))
+
+hess <- hessian(devfun, unlist(parsglmmControl))
+grad <- grad(devfun, unlist(parsglmmControl))
+scgradGlmm <- solve(hess, grad)
+
+# Compare models' internal gradient values to the Richardson method.
+max(pmin(abs(scgradGlmm), abs(grad)))
+max(pmin(abs(scgrad1Glmm),abs(derivs1Glmm$gradient)))
+# The Richardson extrapolation shows that the actual gradient is close to the
+# typical tolerance of .001, while the model's value says it is much lower.
+# seems decent enough.
+
+# Restart fit from value reached initially.
+glmmControlRestart <- update(glmmControl$full_model,
+                                 start=parsglmmControl)
+# Same warning and similar varCor results.
+
+# Compare optimizer results to make sure convergence errors are false positives.
+optimizerCompGlmm <- 
+  allFit(glmmControl$full_model)
+
+#lapply(optimizerCompGlmm,function(x) x@optinfo$conv$lme4$messages)
+
+# Again, only optimizers using Nelder Mead have trouble.
+sumOptimizerCompGlmm <- 
+  summary(optimizerCompGlmm)
+
+sumOptimizerCompGlmm$which.OK
+sumOptimizerCompGlmm$theta
+# Nelder-Mead gives strange results for various fixed effects compared to others
+sumOptimizerCompGlmm$llik
+# Optimizer performance is practically the same aside from N-M
+
+# Remove objects created
+rm(glmmControlRestart,
+   parsglmmControl,
+   devfun,
+   tt,
+   ll,
+   hess,
+   grad)
+
+
+```
+
+
+```{r Maximally specified self-control model}
+
+# Now estimate full model, to report any other interactions in SI for 
+# transparency.
+glmmControlFull <-
+  mixed(
+    urgeControlled ~
+      hungerState * typeOfUrge * MIS +
+      age +
+      sex +
+      hour +
+      weekDay +
+      urgeIntensity +
+      (typeOfUrge | ParticipantID),
+    family = "binomial",
+    method = 'LRT',
+    data = controlAnalysisData,
+    control = glmerControl(optimizer = "bobyqa",
+                           optCtrl = list(maxfun = 1e5))
+  )
+
+# It's possible to check the model's performance by fitting different
+# optimizers. Nelder Mead performs worse, but all others have similar
+# loglikelihoods and parameter values. The convergence warnings should be
+# false positives.
+#a <- allFit(glmmControl$full_model)
+#summary(a)
+
+```
+
+```{r glmm coefficients and comparisons}
+
+OddsMisControl = exp(-0.1384053)
+(ciLowerMisControl = exp(-0.1384053 - 1.96 * 0.0840119))
+(ciUpperMisControl = exp(-0.1384053 + 1.96 * 0.0840119))
+
+pairsHungerControl <-
+  pairs(emmeans(glmmControl, "hungerState", type = 'response'))
+confint(pairsHungerControl)
+
+emmTypeOfUrgeControl <-
+  emmeans(glmmControl, "typeOfUrge", type = 'response')
+
+pairsTypeHungerControl <- 
+  emmeans(glmmControl, pairwise ~ hungerState|typeOfUrge, type = 'response')
+
+OddsIntensityControl <- exp(-0.3646131)
+ciLowerIntensityControl <- exp(-0.3646131 - 1.96 * 0.0362590)
+ciUpperIntensityControl <- exp(-0.3646131 + 1.96 * 0.0362590)
+
+OddsTimeControl <- exp(-0.2357222)
+ciLowerTimeControl <- exp(-0.2357222 - 1.96 * 0.0674055)
+ciUpperTimeControl <- exp(-0.2357222 + 1.96 * 0.0674055)
+
+# Control variables
+oddsAgeControl <- exp(-.1034155)
+ciLowerAgeControl <- exp(-0.1034155 - 1.96 * 0.1703001)
+ciUpperAgeControl <- exp(-0.1034155 + 1.96 * 0.1703001)
+
+emmeans(glmmControl, ~sex, type = 'response')
+confint(pairs(emmeans(glmmControl, ~sex, type = 'response')))
+```
+
+
+
+```{r Descriptive stats}
+# Some descriptives.
+
+analysisData %>% 
+  group_by(ParticipantID) %>% 
+  summarise(n = n())
+
+analysisData %>%
+  group_by(ParticipantID, 
+           sex, 
+           Age
+           ) %>%
+  summarise(n = n()) %>%
+  group_by(sex) %>%
+  summarise(mean = mean(Age, na.rm = T),
+            sd = sd(Age, na.rm = T),
+            n = n())
+
+# To see the number of times participants had an urge
+# e.g., to commit an act of aggression, run the following:
+analysisData %>% 
+  filter(typeOfUrge == "HIT") %>% 
+  group_by(ParticipantID) %>% 
+  summarise(n = n()) %>% 
+  filter(n > 1)
+
+# Check number of urges reported in each category
+longData %>%
+  filter(!is.na(ParticipantID),
+         urgeBinary == 1) %>%
+  group_by(typeOfUrge) %>%
+  summarise(n = n())
+
+
+
+```
+
+
+
+

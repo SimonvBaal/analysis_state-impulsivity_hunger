@@ -1,0 +1,286 @@
+---
+title: 'State Impulsivity and Hunger: Figures'
+author: "Simon van Baal"
+date: "23/03/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(sjPlot)
+library(stargazer)
+library(xtable)
+
+ggplot2::theme_set(ggplot2::theme_light())
+```
+
+
+```{r Visualisation intensity model}
+
+custom_labels <-
+  as_labeller(function(x) {
+    return(c("Alcohol", "Gamble",
+             "Aggress", "Shop",
+             "Smoke", "Snack"))
+  })
+
+plotTypeHungerIntensity <- 
+  plot(pairsTypeHungerIntensity,
+     comparisons = T, CIs = F,
+     adjust = "bonf") +
+  theme_light() +
+  labs(x = 'Type of urge',
+       y = 'Urge Intensity') +
+  lims(x = c(1,10)) +
+  facet_wrap(~ typeOfUrge, 
+             labeller = custom_labels, 
+             strip.position = "right", 
+             ncol = 1) +
+  scale_y_discrete(labels = c("Hungry", "Not Hungry"))
+ggsave(here("./output/figures/plot_hunger-urge-type-strength.tiff"),
+         width = 7,
+         height = 4)
+
+
+```
+
+
+```{r plot MIS urge intensity}
+# Reload analysisData and unscale MIS.
+
+analysisDataMis <-
+  longData %>%
+  filter(!is.na(urgeMagnitude), 
+         !is.na(ParticipantID),
+         !is.na(MIS)) %>%
+  rename(urgeIntensity = urgeMagnitude,
+         hungerState = hungryText,
+         urgeControlled = CONTROL,
+         sex = Sex) %>%
+  mutate(
+      hour = scale(hour, scale = T), # help optimizers by scaling values.
+      age = scale(Age, scale = T),
+    )
+
+
+# Factorise numerical variables for plotting.
+lmmUrgeIntensityMisAsFactor <-
+  mixed(
+    urgeIntensity ~
+      hungerState * typeOfUrge +
+      MIS +
+      age +
+      sex +
+      hour +
+      weekDay +
+      (typeOfUrge | ParticipantID),
+    data = analysisDataMis %>%
+      mutate(MIS = factor(round(MIS, 2)))
+  )
+
+
+afex_plot(lmmUrgeIntensityMisAsFactor, ~ MIS) + 
+  labs(x = "MIS Score",
+       y = "Urge Intensity")
+ggsave(here("./output/figures/plot_mis-urge-intensity.tiff"),
+       width = 7, 
+       height = 4)
+```
+
+
+
+
+```{r plot hunger self-control}
+# unused plots below, can be used for visualisation
+
+plotTypeHungerControl <- 
+  plot(pairsTypeHungerControl,
+     comparisons = T, CIs = F,
+     adjust = "bonf") +
+  theme_light() +
+  labs(x = 'Type of urge',
+       y = 'Probability of Urge Control') +
+  lims(x = c(0, 1)) +
+  facet_wrap(~ typeOfUrge, 
+             labeller = custom_labels, 
+             strip.position = "right", 
+             ncol = 1) +
+  scale_y_discrete(labels = c("Hungry", "Not Hungry"))
+ggsave(here("./output/figures/plot_hunger-urge-type-control.tiff"),
+         width = 7,
+         height = 4)
+
+```
+
+```{r plot hour self-control}
+
+# Make new dataset with unscaled time of day variable
+analysisDataHour <-
+  longData %>%
+  filter(!is.na(urgeMagnitude), 
+         !is.na(ParticipantID),
+         !is.na(MIS)) %>%
+  rename(urgeIntensity = urgeMagnitude,
+         hungerState = hungryText,
+         urgeControlled = CONTROL,
+         sex = Sex) %>%
+  mutate(
+      MIS = scale(MIS, scale = T), # help optimizers by scaling values.
+      age = scale(Age, scale = T),
+    )
+
+# We decide to convert numerical variables to factors, so the data is more 
+# transparent in the figure.
+glmmControlHourUnscaled <-
+  mixed(
+    urgeControlled ~
+      hungerState * typeOfUrge +
+      urgeIntensity +
+      MIS +
+      hour +
+      weekDay +
+      age +
+      sex +
+      (typeOfUrge | ParticipantID),
+    family = "binomial",
+    method = 'LRT',
+    data = analysisDataHour %>%
+      mutate(urgeIntensity = scale(urgeIntensity, scale = F)),
+    control = glmerControl(optCtrl = list(maxfun = 1e5))
+  )
+
+plot_model(glmmControlHourUnscaled$full_model, 
+           type = "pred", 
+           terms = "hour",
+           axis.lim = c(0, 1)) +
+  labs(x = "Time of Day (hours)",
+       y = "Probability of Urge Control",
+       title = NULL)
+ggsave(here("./output/figures/plot_time-control.tiff"),
+       width = 7,
+       height = 4)
+
+```
+
+
+```{r plot intensity self-control}
+# Run the model with factorised urge intensity to show the relationship for
+# each level.
+
+glmmControlIntensityAsFactor <-
+  mixed(
+    urgeControlled ~
+      hungerState * typeOfUrge +
+      urgeIntensity +
+      MIS +
+      age +
+      sex +
+      hour +
+      weekDay +
+      (typeOfUrge | ParticipantID),
+    family = "binomial",
+    method = 'LRT',
+    data = analysisData %>%
+      mutate(urgeIntensity = factor(urgeIntensity))
+  )
+
+afex_plot(glmmControlIntensityAsFactor, ~urgeIntensity) +
+  labs(x = "Urge Intensity", y = "Probability of Urge Control")
+ggsave(here("./output/figures/plot_intensity-control.tiff"),
+       width = 7,
+       height = 4)
+
+
+
+```
+
+```{r emmeans self-control plot}
+
+plot(emmTypeOfUrgeControl, comparisons = T) +
+  theme_light()
+
+```
+
+```{r Tables for full models}
+
+lmerUrgeStrengthFull <-
+  lmer(urgeIntensity ~
+          hungerState*typeOfUrge*MIS +
+          hour +
+          age +
+          sex +
+          hour +
+          weekDay +
+          (typeOfUrge|ParticipantID),
+        data = analysisData,
+        control = lmerControl(
+          optCtrl = list(
+            ftol_abs = 1e-8, 
+            xtol_abs = 1e-8,
+            maxfun = 1e5))
+        )
+
+lmerUrgeStrength <-
+  lme4::lmer(
+    urgeIntensity ~
+      hungerState*typeOfUrge +
+      MIS +
+      age +
+      sex +
+      hour +
+      weekDay +
+      (typeOfUrge | ParticipantID),
+    data = analysisData,
+    control = lmerControl(optCtrl = list(
+      ftol_abs = 1e-8,
+      xtol_abs = 1e-8,
+      maxfun = 1e5
+    ))
+  )
+
+class(lmerUrgeStrength) <- "lmerMod"
+class(lmerUrgeStrengthFull) <- "lmerMod"
+
+# Rendering a comparison between the full model and the reduced model.
+
+stargazer(lmerUrgeStrengthFull, 
+          lmerUrgeStrength, 
+                     out = here("./output/table/comp-table_lmm_hsi.html"))
+
+stargazer(glmmControlFull$full_model, 
+          glmmControl$full_model, 
+                     out = here("./output/table/comp-table_glmm_hsi.html"))
+
+
+```
+
+
+```{r Print anova table}
+aovLmmTable <- nice(lmmUrgeStrengthFull)
+aovGlmmTable <- nice(glmmControlFull)
+
+print(
+  xtable(aovLmmTable,
+         caption = "Urge Intensity"),
+  type = "html",
+  file = here("./output/table/aov_lmm_hsi.html"),
+  include.rownames = F
+)
+
+print(
+  xtable(aovGlmmTable,
+         caption = "Urge Control"),
+  type = "html",
+  file = here("output/table/aov_glmm_hsi.html"),
+  include.rownames = F
+)
+
+
+
+
+```
+
+
+
+
+
