@@ -58,4 +58,4 @@ collaborators for their input: Antonio Verdejo-Garcia, Neda Moskovsky,
 and Jakob Hohwy.
 
 ## Project status
-This project is still under development.
+This project is finished.
