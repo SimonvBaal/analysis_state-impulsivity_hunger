@@ -46,7 +46,8 @@ Figures in the paper can be reproduced in the analysis script file and can also
 be found in the 'output/figures' folder.
 
 ## Support
-Should you have any problems, please send an email to simon.vanbaal1@monash.edu
+Should you have any problems, please send an email to either my permanent email: 
+simonvanbaal.behsci@gmail.com, or my institutional email listed on my profile page.
 
 ## Contributing
 This project is not open for contributions. However, if you find a mistake,
